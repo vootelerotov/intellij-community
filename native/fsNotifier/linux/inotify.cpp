@@ -41,14 +41,14 @@ __asm__(".symver memcpy,memcpy@GLIBC_2.2.5");
 typedef struct __watch_node {
   int wd;
   struct __watch_node* parent;
-  array* kids;
+  vector<__watch_node*>* kids;
   int path_len;
   char path[];
 } watch_node;
 
 static int inotify_fd = -1;
 static int watch_count = 0;
-static table* watches;
+static map<int,watch_node*>* watches;
 static bool limit_reached = false;
 static void (* callback)(const char*, int) = NULL;
 
@@ -82,7 +82,7 @@ bool init_inotify() {
   }
   userlog(LOG_INFO, "inotify watch descriptors: %d", watch_count);
 
-  watches = table_create(watch_count);
+  watches = new map<int, watch_node*>();
   if (watches == NULL) {
     userlog(LOG_ERR, "out of memory");
     close(inotify_fd);
@@ -145,7 +145,7 @@ static int add_watch(int path_len, watch_node* parent) {
     userlog(LOG_DEBUG, "watching %s: %d", path_buf, wd);
   }
 
-  watch_node* node = table_get(watches, wd);
+  watch_node* node = watches->at(wd);
   if (node != NULL) {
     if (node->wd != wd) {
       userlog(LOG_ERR, "table error: corruption at %d:%s / %d:%s)", wd, path_buf, node->wd, node->path);
@@ -168,7 +168,7 @@ static int add_watch(int path_len, watch_node* parent) {
     return wd;
   }
 
-  node = malloc(sizeof(watch_node) + path_len + 1);
+  node = (watch_node*) malloc(sizeof(watch_node) + path_len + 1);
   CHECK_NULL(node, ERR_ABORT);
   memcpy(node->path, path_buf, path_len + 1);
   node->path_len = path_len;
@@ -178,17 +178,13 @@ static int add_watch(int path_len, watch_node* parent) {
 
   if (parent != NULL) {
     if (parent->kids == NULL) {
-      parent->kids = array_create(DEFAULT_SUBDIR_COUNT);
+      parent->kids = new vector<watch_node*>(DEFAULT_SUBDIR_COUNT);
       CHECK_NULL(parent->kids, ERR_ABORT);
     }
-    CHECK_NULL(array_push(parent->kids, node), ERR_ABORT);
+    parent->kids->push_back(node);
   }
 
-  if (table_put(watches, wd, node) == NULL) {
-    userlog(LOG_ERR, "table error: unable to put (%d:%s)", wd, path_buf);
-    return ERR_ABORT;
-  }
-
+  watches->insert(std::pair<int, watch_node*>(wd, node));
   return wd;
 }
 
@@ -200,7 +196,7 @@ static void watch_limit_reached() {
 }
 
 static void rm_watch(int wd, bool update_parent) {
-  watch_node* node = table_get(watches, wd);
+  watch_node* node = watches->at(wd);
   if (node == NULL) {
     return;
   }
@@ -211,31 +207,31 @@ static void rm_watch(int wd, bool update_parent) {
     userlog(LOG_DEBUG, "inotify_rm_watch(%d:%s): %s", node->wd, node->path, strerror(errno));
   }
 
-  for (int i=0; i<array_size(node->kids); i++) {
-    watch_node* kid = array_get(node->kids, i);
+  for (int i=0; i<node->kids->size(); i++) {
+    watch_node* kid = node->kids->at(i);
     if (kid != NULL) {
       rm_watch(kid->wd, false);
     }
   }
 
   if (update_parent && node->parent != NULL) {
-    for (int i=0; i<array_size(node->parent->kids); i++) {
-      if (array_get(node->parent->kids, i) == node) {
-        array_put(node->parent->kids, i, NULL);
+    for (int i=0; i<node->parent->kids->size(); i++) {
+      if (node->parent->kids->at(i) == node) {
+        node->parent->kids->assign(i, NULL);
         break;
       }
     }
   }
 
-  array_delete(node->kids);
+  delete(node->kids);
   free(node);
-  table_put(watches, wd, NULL);
+  watches->insert(std::pair<int, watch_node*>(wd, NULL));
 }
 
 
-static int walk_tree(int path_len, watch_node* parent, bool recursive, array* mounts) {
-  for (int j=0; j<array_size(mounts); j++) {
-    char* mount = array_get(mounts, j);
+static int walk_tree(int path_len, watch_node* parent, bool recursive, vector<char*>* mounts) {
+  for (int j=0; j<mounts->size(); j++) {
+    char* mount = mounts->at(j);
     if (strncmp(path_buf, mount, strlen(mount)) == 0) {
       userlog(LOG_DEBUG, "watch path '%s' crossed mount point '%s' - skipping", path_buf, mount);
       return ERR_IGNORE;
@@ -291,7 +287,7 @@ static int walk_tree(int path_len, watch_node* parent, bool recursive, array* mo
       }
     }
 
-    int subdir_id = walk_tree(path_len + 1 + name_len, table_get(watches, id), recursive, mounts);
+    int subdir_id = walk_tree(path_len + 1 + name_len, watches->at(id), recursive, mounts);
     if (subdir_id < 0 && subdir_id != ERR_IGNORE) {
       rm_watch(id, true);
       id = subdir_id;
@@ -304,7 +300,7 @@ static int walk_tree(int path_len, watch_node* parent, bool recursive, array* mo
 }
 
 
-int watch(const char* root, array* mounts) {
+int watch(const char* root, vector<char*>* mounts) {
   bool recursive = true;
   if (root[0] == '|') {
     root++;
@@ -351,7 +347,7 @@ void unwatch(int id) {
 
 
 static bool process_inotify_event(struct inotify_event* event) {
-  watch_node* node = table_get(watches, event->wd);
+  watch_node* node = watches->at(event->wd);
   if (node == NULL) {
     return true;
   }
@@ -380,11 +376,11 @@ static bool process_inotify_event(struct inotify_event* event) {
   }
 
   if (is_dir && event->mask & (IN_DELETE | IN_MOVED_FROM)) {
-    for (int i=0; i<array_size(node->kids); i++) {
-      watch_node* kid = array_get(node->kids, i);
+    for (int i=0; i<node->kids->size(); i++) {
+      watch_node* kid = node->kids->at(i);
       if (kid != NULL && strncmp(path_buf, kid->path, kid->path_len) == 0) {
         rm_watch(kid->wd, false);
-        array_put(node->kids, i, NULL);
+        node->kids->assign(i, NULL);
         break;
       }
     }
@@ -425,7 +421,7 @@ bool process_inotify_input() {
 
 void close_inotify() {
   if (watches != NULL) {
-    table_delete(watches);
+    delete(watches);
   }
 
   if (inotify_fd >= 0) {

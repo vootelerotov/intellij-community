@@ -16,11 +16,17 @@
 
 #pragma once
 
-#define VERSION "20170302.1839"
+#define VERSION "20181113.1428"
 
 #include <stdbool.h>
 #include <stdio.h>
 
+#include <vector>
+#include <map>
+#include <set>
+using std::vector;
+using std::map;
+using std::set;
 
 // messaging
 typedef enum {
@@ -35,55 +41,49 @@ void userlog(int priority, const char* format, ...);
 
 #define CHECK_NULL(p, r) if (p == NULL) { userlog(LOG_ERR, "out of memory"); return r; }
 
+template <typename T, typename C>
+void vector_delete_vs_data(vector<T*, C> *a) {
+  if (a != NULL) {
+    for (int i = 0; i < a->size(); i++) {
+	  T* item = a->at(i);
+	  if (item != NULL) {
+		free(item);
+	  }
+	}
+	a->clear();
+	delete(a);
+  }
+}
 
-// variable-length array
-typedef struct __array array;
+template <typename T, typename C>
+void set_delete_vs_data(set<T*, C> *s) {
+  if (s != NULL) {
+    for (typename set<T*, C>::iterator it = s->begin(); it != s->end(); it++) {
+	  T* item = *it;
+	  if (item != NULL) {
+	    free(*it);
+	  }
+    }
+    delete(s);
+  }
+}
 
-array* array_create(int initial_capacity);
-int array_size(array* a);
-void* array_push(array* a, void* element);
-void* array_pop(array* a);
-void array_put(array* a, int index, void* element);
-void* array_get(array* a, int index);
-void array_delete(array* a);
-void array_delete_vs_data(array* a);
-void array_delete_data(array* a);
+template <typename T, typename C>
+bool set_difference(set<T*, C>* s1, set<T*, C>* s2, set<T*, C>* diff) {
+  if (s1 == NULL || s2 == NULL || diff == NULL) {
+    return false;
+  }
+  typename set<T*, C>::iterator it;
+  T* elem = NULL;
+  for (it = s2->begin(); it != s2->end(); it++) {
+	elem = *it;
+    if (s1->find(elem) == s1->end()) {
+	  diff->insert(elem);
+    }
+  }
 
-
-// poor man's hash table
-typedef struct __table table;
-
-table* table_create(int capacity);
-void* table_put(table* t, int key, void* value);
-void* table_get(table* t, int key);
-void table_delete(table* t);
-
-
-// hashset
-typedef struct __set set;
-
-set* set_create(int capacity);
-bool set_add(set* s, char* elem);
-bool set_contains(set* s, char* elem);
-bool set_remove(set* s, char* elem);
-int set_size(set* s);
-void set_delete(set* s);
-void set_delete_data(set* s);
-void set_delete_vs_data(set* s);
-
-bool set_difference(set* s1, set* s2, set* diff);
-
-
-
-typedef struct __set_iterator set_iterator;
-
-set_iterator* set_itr(set* st);
-bool set_itr_next(set_iterator* it, char** ptr);
-bool set_itr_has_next(set_iterator* it);
-void set_itr_delete(set_iterator* it);
-
-
-
+  return true;
+}
 
 // inotify subsystem
 enum {
@@ -96,7 +96,7 @@ enum {
 bool init_inotify();
 void set_inotify_callback(void (* callback)(const char*, int));
 int get_inotify_fd();
-int watch(const char* root, array* mounts);
+int watch(const char* root, vector<char*>* mounts);
 void unwatch(int id);
 bool process_inotify_input();
 void close_inotify();
